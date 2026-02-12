@@ -16,7 +16,6 @@ let currentSessionId = null;
 
 console.log("Railway rodando e aguardando usuário do Lovable...");
 
-// Escuta novas sessões criadas
 supabase
   .channel("sessions")
   .on(
@@ -28,20 +27,11 @@ supabase
 
       console.log("Novo usuário solicitado:", username);
 
-      // Se já tinha uma live conectada, desconecta e limpa dados
+      // Se já tinha uma live conectada, desconecta
       if (currentLive) {
         console.log("Desconectando live anterior...");
         currentLive.removeAllListeners();
         currentLive.disconnect();
-        
-        // Limpa eventos da sessão anterior
-        if (currentSessionId) {
-          console.log(`Limpando eventos da sessão ${currentSessionId}...`);
-          await supabase
-            .from("tiktok_events")
-            .delete()
-            .eq("session_id", currentSessionId);
-        }
       }
 
       // Atualiza sessão atual
@@ -64,7 +54,7 @@ supabase
           username: data.uniqueId,
           like_count: data.likeCount,
           profile_pic: data.profilePictureUrl,
-          session_id: currentSessionId,
+          session_id: currentSessionId, // ✅ VINCULA À SESSÃO
           raw_event: data
         });
       });
@@ -77,7 +67,7 @@ supabase
           gift_name: data.giftName,
           gift_value: data.diamondCount,
           profile_pic: data.profilePictureUrl,
-          session_id: currentSessionId,
+          session_id: currentSessionId, // ✅ VINCULA À SESSÃO
           raw_event: data
         });
       });
@@ -86,16 +76,7 @@ supabase
       currentLive.on("streamEnd", async (data) => {
         console.log("🔴 Live encerrada:", data);
         
-        // Limpa eventos da sessão
-        if (currentSessionId) {
-          console.log(`Limpando eventos da sessão ${currentSessionId}...`);
-          await supabase
-            .from("tiktok_events")
-            .delete()
-            .eq("session_id", currentSessionId);
-        }
-        
-        // Atualiza status no Supabase
+        // Atualiza status no Supabase (o trigger limpará os eventos)
         await supabase
           .from("tiktok_sessions")
           .update({ status: "disconnected" })
@@ -111,14 +92,11 @@ supabase
       currentLive.on("error", async (err) => {
         console.error("❌ Erro na conexão TikTok:", err);
         
-        // Limpa eventos em caso de erro
-        if (currentSessionId) {
-          console.log(`Limpando eventos da sessão ${currentSessionId} por erro...`);
-          await supabase
-            .from("tiktok_events")
-            .delete()
-            .eq("session_id", currentSessionId);
-        }
+        // Atualiza status no Supabase (o trigger limpará os eventos)
+        await supabase
+          .from("tiktok_sessions")
+          .update({ status: "disconnected" })
+          .eq("id", currentSessionId);
         
         currentLive.removeAllListeners();
         currentLive.disconnect();
