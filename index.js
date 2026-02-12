@@ -51,6 +51,7 @@ supabase
           event_type: "like",
           username: data.uniqueId,
           like_count: data.likeCount,
+          profile_pic: data.profilePictureUrl, // ✅ NOVO!
           raw_event: data
         });
       });
@@ -62,6 +63,7 @@ supabase
           username: data.uniqueId,
           gift_name: data.giftName,
           gift_value: data.diamondCount,
+          profile_pic: data.profilePictureUrl, // ✅ NOVO!
           raw_event: data
         });
       });
