@@ -1,6 +1,12 @@
 import { WebcastPushConnection } from "tiktok-live-connector";
 import { createClient } from "@supabase/supabase-js";
 
+// ✅ Validação logo depois dos imports
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  console.error("❌ Variáveis de ambiente do Supabase não configuradas!");
+  process.exit(1);
+}
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
