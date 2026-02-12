@@ -1,7 +1,6 @@
 import { WebcastPushConnection } from "tiktok-live-connector";
 import { createClient } from "@supabase/supabase-js";
 
-// Validação das variáveis de ambiente
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   console.error("❌ Variáveis de ambiente do Supabase não configuradas!");
   process.exit(1);
@@ -13,10 +12,10 @@ const supabase = createClient(
 );
 
 let currentLive = null;
+let currentSessionId = null;
 
 console.log("Railway rodando e aguardando usuário do Lovable...");
 
-// Escuta novas sessões criadas no Supabase
 supabase
   .channel("sessions")
   .on(
@@ -24,6 +23,7 @@ supabase
     { event: "INSERT", schema: "public", table: "tiktok_sessions" },
     async (payload) => {
       const username = payload.new.username.replace("@", "");
+      const sessionId = payload.new.id;
 
       console.log("Novo usuário solicitado:", username);
 
@@ -33,7 +33,8 @@ supabase
         currentLive.disconnect();
       }
 
-      // Conecta no novo usuário
+      // Atualiza sessão atual
+      currentSessionId = sessionId;
       currentLive = new WebcastPushConnection(username);
       await currentLive.connect();
 
@@ -41,7 +42,7 @@ supabase
       await supabase
         .from("tiktok_sessions")
         .update({ status: "connected" })
-        .eq("id", payload.new.id);
+        .eq("id", sessionId);
 
       console.log("Conectado na live de:", username);
 
@@ -51,7 +52,8 @@ supabase
           event_type: "like",
           username: data.uniqueId,
           like_count: data.likeCount,
-          profile_pic: data.profilePictureUrl, // ✅ NOVO!
+          profile_pic: data.profilePictureUrl,
+          session_id: currentSessionId, // ✅ NOVO!
           raw_event: data
         });
       });
@@ -63,7 +65,8 @@ supabase
           username: data.uniqueId,
           gift_name: data.giftName,
           gift_value: data.diamondCount,
-          profile_pic: data.profilePictureUrl, // ✅ NOVO!
+          profile_pic: data.profilePictureUrl,
+          session_id: currentSessionId, // ✅ NOVO!
           raw_event: data
         });
       });
