@@ -23,53 +23,51 @@ let battleState = {
   scoreB: 0,
   roundStarted: false,
   lastArmyUpdate: 0,
-  roundProcessed: false
+  roundProcessed: false,
+  battleStartTime: null
 };
 
-// Configuração do gift para roleta (padrão: Heart Me = giftId 5281)
+// Configuração do gift para roleta (Heart Me = giftId 5281)
 const HEARTME_GIFT_ID = 5281;
 const HEARTME_GIFT_NAME = "Heart Me";
 
-console.log("🚀 Railway rodando - Sistema de Batalhas VS + Roleta de Gifts");
+console.log("🚀 Railway iniciado - Sistema de Batalhas VS + Roleta de Gifts");
+console.log("📡 Versão: 2.0 - Eventos de batalha e gifts");
 
-// Função para processar sessão pendente
-async function processPendingSession() {
+// Função para buscar sessão pendente ao iniciar
+async function checkPendingSessions() {
   try {
-    // Busca a sessão mais recente com status 'pending'
-    const { data: session } = await supabase
+    console.log("🔍 Buscando sessões pendentes...");
+    
+    const { data: sessions } = await supabase
       .from("tiktok_sessions")
       .select("*")
       .eq("status", "pending")
       .order("created_at", { ascending: false })
-      .limit(1)
-      .single();
+      .limit(1);
 
-    if (!session) {
-      console.log("🔍 Nenhuma sessão pendente encontrada");
-      return;
+    if (sessions && sessions.length > 0) {
+      const session = sessions[0];
+      console.log(`✅ Encontrada sessão pendente: ${session.username} (ID: ${session.id})`);
+      await connectToLive(session.username.replace("@", ""), session.id);
+    } else {
+      console.log("ℹ️ Nenhuma sessão pendente encontrada");
     }
-
-    console.log(`🔄 Processando sessão pendente: ${session.username} (ID: ${session.id})`);
-    await connectToLive(session.username.replace("@", ""), session.id);
-    
   } catch (error) {
     console.error("❌ Erro ao buscar sessões pendentes:", error.message);
   }
 }
 
-// Função para conectar na live do TikTok
+// Função principal para conectar na live
 async function connectToLive(username, sessionId) {
   // Limpa conexão anterior se existir
   if (currentLive) {
     console.log("🔌 Desconectando live anterior...");
-    currentLive.removeAllListeners();
-    currentLive.disconnect();
-    currentLive = null;
-    currentSessionId = null;
+    await cleanupSession();
   }
 
   try {
-    // Atualiza status para 'connecting' ANTES de tentar conectar
+    // Atualiza status para 'connecting'
     await supabase
       .from("tiktok_sessions")
       .update({ status: "connecting" })
@@ -81,55 +79,97 @@ async function connectToLive(username, sessionId) {
     console.log(`🔌 Conectando na live de @${username}...`);
     await currentLive.connect();
 
-    // ✅ Atualiza status para 'connected' SOMENTE após conexão bem-sucedida
+    // ✅ Atualiza status para 'connected' APÓS conexão bem-sucedida
     await supabase
       .from("tiktok_sessions")
       .update({ status: "connected" })
       .eq("id", sessionId);
 
-    console.log(`✅ Conectado na live de @${username}`);
+    console.log(`✅ CONECTADO na live de @${username}!`);
+    console.log("📡 Aguardando eventos...");
 
-    // Zera estado da batalha ao conectar
+    // Zera estado da batalha
     resetBattleState();
 
-    // ESCUTA EVENTOS DE BATALHA
+    // ========== ESCUTA DE EVENTOS ==========
+
+    // EVENTO: Like (para debug)
+    currentLive.on("like", (data) => {
+      console.log(`❤️ Like: ${data.uniqueId} (${data.likeCount}x)`);
+    });
+
+    // EVENTO: Gift (para debug e Heart-Me)
+    currentLive.on("gift", async (data) => {
+      console.log(`🎁 Gift: ${data.uniqueId} - ${data.giftName} (${data.diamondCount} diamantes)`);
+      
+      // Verifica se é Heart Me para roleta
+      const isHeartMe = 
+        data.giftId === HEARTME_GIFT_ID || 
+        (data.giftName && data.giftName.toLowerCase().includes(HEARTME_GIFT_NAME.toLowerCase()));
+      
+      if (isHeartMe) {
+        console.log(`🎯 HEART-ME DETECTADO de ${data.uniqueId}!`);
+        await saveGiftEvent("heartme", data);
+      } else {
+        await saveGiftEvent("gift", data);
+      }
+    });
+
+    // EVENTO: Batalha Iniciada (linkMicBattle)
     currentLive.on("linkMicBattle", async (data) => {
       try {
-        console.log("⚔️ Batalha iniciada:", data);
+        console.log("⚔️ EVENTO BATALHA INICIADA:");
+        console.log(JSON.stringify(data, null, 2));
         
-        // Identifica participantes (host sempre é participantA)
+        // Identifica participantes
         const anchorInfo = data.anchorInfo || {};
         const participants = Object.values(anchorInfo).filter(p => p.nickname);
         
         if (participants.length >= 2) {
-          battleState.participantA = participants[0]; // Host (sempre primeiro)
-          battleState.participantB = participants[1]; // Oponente
+          battleState.participantA = participants[0]; // Host (primeiro)
+          battleState.participantB = participants[1]; // Oponente (segundo)
           battleState.roundStarted = true;
+          battleState.battleStartTime = Date.now();
           battleState.lastArmyUpdate = Date.now();
           battleState.roundProcessed = false;
           
-          // Salva evento de batalha no Supabase
+          console.log(`👥 Participantes identificados:`);
+          console.log(`   A (Host): ${battleState.participantA.nickname}`);
+          console.log(`   B (Oponente): ${battleState.participantB.nickname}`);
+          
+          // Salva evento no Supabase
           await saveBattleEvent("battle_start", {
             participantA: battleState.participantA.nickname,
             participantB: battleState.participantB.nickname,
-            roomId: data.roomId
+            roomId: data.roomId,
+            timestamp: new Date().toISOString()
           });
+        } else {
+          console.warn("⚠️ Menos de 2 participantes na batalha");
         }
       } catch (err) {
-        console.error("❌ Erro no evento linkMicBattle:", err.message);
+        console.error("❌ Erro no evento linkMicBattle:", err);
       }
     });
 
-    // ESCUTA ATUALIZAÇÕES DE PONTUAÇÃO
+    // EVENTO: Atualização de Pontuação (linkMicArmies)
     currentLive.on("linkMicArmies", async (data) => {
       try {
-        if (!battleState.roundStarted) return;
+        if (!battleState.roundStarted) {
+          console.log("ℹ️ Atualização de exército recebida, mas batalha não iniciada");
+          return;
+        }
         
-        battleState.lastArmyUpdate = Date.now();
+        const oldScoreA = battleState.scoreA;
+        const oldScoreB = battleState.scoreB;
+        
         battleState.scoreA = data.audienceCount1 || 0;
         battleState.scoreB = data.audienceCount2 || 0;
+        battleState.lastArmyUpdate = Date.now();
         
-        console.log(`📊 Pontuação: ${battleState.scoreA} vs ${battleState.scoreB}`);
+        console.log(`📊 PONTUAÇÃO ATUALIZADA:`);
+        console.log(`   ${battleState.participantA?.nickname || 'A'}: ${oldScoreA} → ${battleState.scoreA}`);
+        console.log(`   ${battleState.participantB?.nickname || 'B'}: ${oldScoreB} → ${battleState.scoreB}`);
         
         // Salva atualização de scores
         await saveBattleEvent("battle_score", {
@@ -143,29 +183,35 @@ async function connectToLive(username, sessionId) {
           if (battleState.roundStarted && 
               !battleState.roundProcessed && 
               Date.now() - battleState.lastArmyUpdate > 15000) {
+            console.log("⏰ Timeout de 15s atingido - Processando fim de round...");
             await processBattleRoundEnd();
           }
         }, 15000);
         
       } catch (err) {
-        console.error("❌ Erro no evento linkMicArmies:", err.message);
+        console.error("❌ Erro no evento linkMicArmies:", err);
       }
     });
 
-    // ESCUTA RESULTADO DA BATALHA
+    // EVENTO: Resultado da Batalha (linkMicMethod)
     currentLive.on("linkMicMethod", async (data) => {
       try {
-        if (battleState.roundProcessed) return;
+        if (battleState.roundProcessed) {
+          console.log("ℹ️ Resultado já processado, ignorando...");
+          return;
+        }
         
-        console.log(`🏆 Resultado da batalha: ${data.win ? 'Vitória' : 'Derrota'}`);
+        console.log(`🏆 RESULTADO DA BATALHA: ${data.win ? 'VITÓRIA' : 'DERROTA'}`);
         
         // Deduz coração baseado no resultado
         if (data.win) {
           // Host venceu -> oponente perde coração
           battleState.heartsB = Math.max(0, battleState.heartsB - 1);
+          console.log(`💔 Oponente perdeu 1 coração (${battleState.heartsB} restantes)`);
         } else {
           // Host perdeu -> host perde coração
           battleState.heartsA = Math.max(0, battleState.heartsA - 1);
+          console.log(`💔 Host perdeu 1 coração (${battleState.heartsA} restantes)`);
         }
         
         battleState.roundProcessed = true;
@@ -174,73 +220,62 @@ async function connectToLive(username, sessionId) {
         await saveBattleEvent("battle_result", {
           winner: data.win ? "participantA" : "participantB",
           heartsA: battleState.heartsA,
-          heartsB: battleState.heartsB
+          heartsB: battleState.heartsB,
+          timestamp: new Date().toISOString()
         });
         
         // Verifica fim de jogo
         if (battleState.heartsA === 0 || battleState.heartsB === 0) {
+          const winner = battleState.heartsA === 0 ? "participantB" : "participantA";
+          console.log(`🎮 BATALHA ENCERRADA - Vencedor: ${winner}`);
+          
           await saveBattleEvent("battle_end", {
-            winner: battleState.heartsA === 0 ? "participantB" : "participantA",
+            winner,
             finalHeartsA: battleState.heartsA,
-            finalHeartsB: battleState.heartsB
+            finalHeartsB: battleState.heartsB,
+            timestamp: new Date().toISOString()
           });
+          
           resetBattleState();
         }
         
       } catch (err) {
-        console.error("❌ Erro no evento linkMicMethod:", err.message);
+        console.error("❌ Erro no evento linkMicMethod:", err);
       }
     });
 
-    // ESCUTA GIFTs PARA ROLETA (Heart-Me)
-    currentLive.on("gift", async (data) => {
-      try {
-        // Verifica se é o gift configurado para roleta
-        const isHeartMe = 
-          data.giftId === HEARTME_GIFT_ID || 
-          data.giftName?.toLowerCase().includes(HEARTME_GIFT_NAME.toLowerCase());
-        
-        if (isHeartMe) {
-          console.log(`🎁 Heart-Me recebido de ${data.uniqueId} (${data.repeatCount || 1}x)`);
-          
-          // Salva evento de gift para roleta
-          await saveGiftEvent("heartme", {
-            username: data.uniqueId,
-            giftName: data.giftName,
-            giftId: data.giftId,
-            repeatCount: data.repeatCount || 1,
-            profilePictureUrl: data.profilePictureUrl
-          });
-        } else {
-          // Salva outros gifts normalmente
-          await saveGiftEvent("gift", {
-            username: data.uniqueId,
-            giftName: data.giftName,
-            giftId: data.giftId,
-            diamondCount: data.diamondCount,
-            repeatCount: data.repeatCount || 1,
-            profilePictureUrl: data.profilePictureUrl
-          });
-        }
-      } catch (err) {
-        console.error("❌ Erro no evento gift:", err.message);
-      }
-    });
-
-    // ESCUTA FIM DA LIVE
+    // EVENTO: Fim da Live
     currentLive.on("streamEnd", async (data) => {
-      console.log(`🔴 Live encerrada: ${username}`);
+      console.log(`🔴 LIVE ENCERRADA: ${username}`);
+      console.log(JSON.stringify(data, null, 2));
       await cleanupSession();
     });
 
-    // TRATAMENTO DE ERROS
+    // EVENTO: Erro
     currentLive.on("error", async (err) => {
-      console.error(`❌ Erro na conexão TikTok para ${username}:`, err.message);
+      console.error(`❌ ERRO NA CONEXÃO TikTok para ${username}:`, err);
       await cleanupSession();
+    });
+
+    // EVENTO: Chat (para debug)
+    currentLive.on("chat", (data) => {
+      console.log(`💬 Chat: ${data.uniqueId}: ${data.comment}`);
+    });
+
+    // EVENTO: Follow (para debug)
+    currentLive.on("follow", (data) => {
+      console.log(`➕ Follow: ${data.uniqueId}`);
+    });
+
+    // EVENTO: Share (para debug)
+    currentLive.on("social", (data) => {
+      if (data.displayType === 'share') {
+        console.log(`📤 Share: ${data.uniqueId}`);
+      }
     });
 
   } catch (error) {
-    console.error(`❌ Falha ao conectar na live de ${username}:`, error.message);
+    console.error(`❌ FALHA AO CONECTAR na live de ${username}:`, error);
     
     // Atualiza status para 'error' em caso de falha
     if (currentSessionId) {
@@ -257,18 +292,21 @@ async function connectToLive(username, sessionId) {
 
 // Função para salvar evento de batalha
 async function saveBattleEvent(eventType, eventData) {
-  if (!currentSessionId) return;
+  if (!currentSessionId) {
+    console.warn("⚠️ Tentativa de salvar evento sem session_id");
+    return;
+  }
   
   try {
     // Verifica se a sessão ainda existe
-    const { data: sessionExists } = await supabase
+    const {  session } = await supabase
       .from("tiktok_sessions")
       .select("id")
       .eq("id", currentSessionId)
       .single();
 
-    if (!sessionExists) {
-      console.warn(`⚠️ Sessão ${currentSessionId} não existe mais. Ignorando evento de batalha.`);
+    if (!session) {
+      console.warn(`⚠️ Sessão ${currentSessionId} não existe mais. Ignorando evento.`);
       return;
     }
 
@@ -290,52 +328,61 @@ async function saveBattleEvent(eventType, eventData) {
     console.log(`✅ Evento de batalha salvo: ${eventType}`);
     
   } catch (error) {
-    console.error("❌ Erro ao salvar evento de batalha:", error.message);
+    console.error("❌ Erro ao salvar evento de batalha:", error);
   }
 }
 
 // Função para salvar evento de gift
-async function saveGiftEvent(eventType, eventData) {
-  if (!currentSessionId) return;
+async function saveGiftEvent(eventType, data) {
+  if (!currentSessionId) {
+    console.warn("⚠️ Tentativa de salvar gift sem session_id");
+    return;
+  }
   
   try {
     // Verifica se a sessão ainda existe
-    const { data: sessionExists } = await supabase
+    const {  session } = await supabase
       .from("tiktok_sessions")
       .select("id")
       .eq("id", currentSessionId)
       .single();
 
-    if (!sessionExists) {
-      console.warn(`⚠️ Sessão ${currentSessionId} não existe mais. Ignorando evento de gift.`);
+    if (!session) {
+      console.warn(`⚠️ Sessão ${currentSessionId} não existe mais. Ignorando gift.`);
       return;
     }
 
     await supabase.from("tiktok_events").insert({
       event_type: eventType,
-      username: eventData.username,
-      like_count: eventType === "like" ? eventData.likeCount : null,
-      gift_name: eventData.giftName,
-      gift_value: eventData.diamondCount || eventData.repeatCount,
-      profile_pic: eventData.profilePictureUrl,
+      username: data.uniqueId,
+      like_count: null,
+      gift_name: data.giftName,
+      gift_value: data.diamondCount || data.repeatCount,
+      profile_pic: data.profilePictureUrl,
       session_id: currentSessionId,
       raw_event: {
         type: eventType,
-        ...eventData,
+        giftId: data.giftId,
+        giftName: data.giftName,
+        diamondCount: data.diamondCount,
+        repeatCount: data.repeatCount,
         timestamp: new Date().toISOString()
       }
     });
     
-    console.log(`✅ Evento de gift salvo: ${eventData.giftName || eventType}`);
+    console.log(`✅ Evento de gift salvo: ${data.giftName || eventType}`);
     
   } catch (error) {
-    console.error("❌ Erro ao salvar evento de gift:", error.message);
+    console.error("❌ Erro ao salvar evento de gift:", error);
   }
 }
 
 // Processa fim de round (dedução de corações)
 async function processBattleRoundEnd() {
-  if (battleState.roundProcessed || !battleState.roundStarted) return;
+  if (battleState.roundProcessed || !battleState.roundStarted) {
+    console.log("ℹ️ Round já processado ou não iniciado");
+    return;
+  }
   
   battleState.roundProcessed = true;
   
@@ -355,16 +402,22 @@ async function processBattleRoundEnd() {
     scoreA: battleState.scoreA,
     scoreB: battleState.scoreB,
     heartsA: battleState.heartsA,
-    heartsB: battleState.heartsB
+    heartsB: battleState.heartsB,
+    timestamp: new Date().toISOString()
   });
   
   // Verifica fim de jogo
   if (battleState.heartsA === 0 || battleState.heartsB === 0) {
+    const winner = battleState.heartsA === 0 ? "participantB" : "participantA";
+    console.log(`🎮 BATALHA ENCERRADA - Vencedor: ${winner}`);
+    
     await saveBattleEvent("battle_end", {
-      winner: battleState.heartsA === 0 ? "participantB" : "participantA",
+      winner,
       finalHeartsA: battleState.heartsA,
-      finalHeartsB: battleState.heartsB
+      finalHeartsB: battleState.heartsB,
+      timestamp: new Date().toISOString()
     });
+    
     resetBattleState();
   }
 }
@@ -380,7 +433,8 @@ function resetBattleState() {
     scoreB: 0,
     roundStarted: false,
     lastArmyUpdate: 0,
-    roundProcessed: false
+    roundProcessed: false,
+    battleStartTime: null
   };
   console.log("🔄 Estado da batalha resetado");
 }
@@ -394,24 +448,32 @@ async function cleanupSession() {
   }
   
   if (currentSessionId) {
-    // ✅ Primeiro deleta os eventos da sessão (evita foreign key violation)
-    await supabase
-      .from("tiktok_events")
-      .delete()
-      .eq("session_id", currentSessionId);
-    
-    // ✅ Depois atualiza status para 'disconnected'
-    await supabase
-      .from("tiktok_sessions")
-      .update({ status: "disconnected" })
-      .eq("id", currentSessionId);
-    
-    console.log(`🧹 Sessão ${currentSessionId} limpa e desconectada`);
+    try {
+      // ✅ Primeiro deleta os eventos da sessão (evita foreign key violation)
+      console.log(`🧹 Limpando eventos da sessão ${currentSessionId}...`);
+      await supabase
+        .from("tiktok_events")
+        .delete()
+        .eq("session_id", currentSessionId);
+      
+      // ✅ Depois atualiza status para 'disconnected'
+      console.log(`🔌 Desconectando sessão ${currentSessionId}...`);
+      await supabase
+        .from("tiktok_sessions")
+        .update({ status: "disconnected" })
+        .eq("id", currentSessionId);
+      
+      console.log(`✅ Sessão ${currentSessionId} limpa e desconectada`);
+    } catch (error) {
+      console.error("❌ Erro ao limpar sessão:", error);
+    }
   }
   
   currentSessionId = null;
   resetBattleState();
 }
+
+// ========== ESCUTA DE MUDANÇAS NO SUPABASE ==========
 
 // ESCUTA NOVAS SESSÕES (INSERT)
 supabase
@@ -443,43 +505,28 @@ supabase
   )
   .subscribe();
 
-// Busca sessões pendentes ao iniciar
-processPendingSession();
+// ========== LIMPEZA AUTOMÁTICA ==========
 
-// Limpeza automática a cada 30 segundos (sessões desconectadas/pending antigas)
+// Limpeza a cada 30 segundos
 setInterval(async () => {
   try {
-    console.log("🧹 Executando limpeza automática de sessões...");
+    console.log("🧹 Executando limpeza automática de sessões antigas...");
     
     // Passo 1: Deletar eventos das sessões antigas
-    await supabase.rpc("cleanup_old_sessions");
+    const { error: eventsError } = await supabase.rpc("cleanup_old_sessions");
     
-    console.log("✅ Limpeza concluída!");
+    if (eventsError) {
+      console.error("❌ Erro na limpeza de eventos:", eventsError.message);
+    } else {
+      console.log("✅ Limpeza de sessões concluída!");
+    }
   } catch (error) {
     console.error("❌ Erro na limpeza automática:", error.message);
   }
 }, 30000);
 
-// Função RPC para limpeza (crie no Supabase)
-console.log("💡 Execute esta função no SQL Editor do Supabase:");
-console.log(`
-CREATE OR REPLACE FUNCTION cleanup_old_sessions()
-RETURNS void AS $$
-BEGIN
-  -- Deleta eventos das sessões antigas primeiro
-  DELETE FROM tiktok_events 
-  WHERE session_id IN (
-    SELECT id FROM tiktok_sessions 
-    WHERE (status = 'disconnected' OR status = 'pending' OR status = 'error')
-      AND created_at < NOW() - INTERVAL '30 seconds'
-  );
-  
-  -- Depois deleta as sessões
-  DELETE FROM tiktok_sessions 
-  WHERE (status = 'disconnected' OR status = 'pending' OR status = 'error')
-    AND created_at < NOW() - INTERVAL '30 seconds';
-END;
-$$ LANGUAGE plpgsql;
-`);
+// Busca sessões pendentes ao iniciar
+checkPendingSessions();
 
-console.log("✅ Railway pronto para batalhas VS e roleta de gifts!");
+console.log("✅ Railway pronto e aguardando sessões!");
+console.log("💡 Dica: Conecte em um streamer que está fazendo BATALHA AGORA");
