@@ -13,6 +13,7 @@ const supabase = createClient(
 
 let currentLive = null;
 let currentSessionId = null;
+let currentStreamerUsername = null;
 let battleState = {
   participantA: null,
   participantB: null,
@@ -26,11 +27,72 @@ let battleState = {
   battleStartTime: null
 };
 
-const HEARTME_GIFT_ID = 5281;
-const HEARTME_GIFT_NAME = "Heart Me";
+// Configuração de gifts para roleta (busca dinâmica do banco)
+let configuredGiftIds = new Set<number>();
+let configuredGiftNames = new Set<string>();
 
-console.log("🚀 Railway iniciado - Sistema de Batalhas VS + Roleta");
+console.log("🚀 Railway iniciado - Sistema de Batalhas VS + Roleta Multi-Gifts");
 console.log("📡 Escutando INSERTs e UPDATEs na tabela tiktok_sessions");
+
+// Carrega gifts configurados do banco
+async function loadConfiguredGifts(streamerUsername: string) {
+  try {
+    console.log(`🔄 Carregando gifts configurados para ${streamerUsername}...`);
+    
+    // Busca gifts configurados para este streamer
+    const { data: configs, error: configError } = await supabase
+      .from("heartme_gift_config")
+      .select(`
+        gift_id,
+        tiktok_gifts(
+          gift_id,
+          name_en,
+          name_pt,
+          name_es,
+          name_br,
+          value
+        )
+      `)
+      .eq("streamer_username", streamerUsername);
+
+    if (configError) {
+      console.error("❌ Erro ao buscar gifts configurados:", configError.message);
+      return;
+    }
+
+    if (!configs || configs.length === 0) {
+      console.log("ℹ️ Nenhum gift configurado. Usando Heart Me (ID: 5281) como padrão.");
+      configuredGiftIds = new Set([5281]);
+      configuredGiftNames = new Set(["Heart Me", "Coração"]);
+      return;
+    }
+
+    // Processa os gifts configurados
+    configuredGiftIds = new Set();
+    configuredGiftNames = new Set();
+
+    configs.forEach(config => {
+      const gift = config.tiktok_gifts;
+      if (gift) {
+        configuredGiftIds.add(gift.gift_id);
+        configuredGiftNames.add(gift.name_en);
+        if (gift.name_pt) configuredGiftNames.add(gift.name_pt);
+        if (gift.name_es) configuredGiftNames.add(gift.name_es);
+        if (gift.name_br) configuredGiftNames.add(gift.name_br);
+        
+        console.log(`✅ Gift configurado: ${gift.name_pt || gift.name_en} (ID: ${gift.gift_id}, ${gift.value} diamantes)`);
+      }
+    });
+
+    console.log(`🎯 Total de gifts configurados: ${configuredGiftIds.size}`);
+    
+  } catch (error) {
+    console.error("❌ Erro ao carregar gifts configurados:", error);
+    // Fallback para Heart Me
+    configuredGiftIds = new Set([5281]);
+    configuredGiftNames = new Set(["Heart Me", "Coração"]);
+  }
+}
 
 // Limpa sessão atual
 async function cleanupSession() {
@@ -53,6 +115,9 @@ async function cleanupSession() {
       // Depois atualiza status para disconnected
       console.log(`✅ Sessão ${currentSessionId} desconectada`);
       currentSessionId = null;
+      currentStreamerUsername = null;
+      configuredGiftIds.clear();
+      configuredGiftNames.clear();
       resetBattleState();
     } catch (error) {
       console.error("❌ Erro ao limpar sessão:", error.message);
@@ -77,7 +142,7 @@ function resetBattleState() {
 }
 
 // Conecta na live
-async function connectToLive(username, sessionId) {
+async function connectToLive(username: string, sessionId: string) {
   // Limpa conexão anterior
   if (currentLive) {
     await cleanupSession();
@@ -86,38 +151,57 @@ async function connectToLive(username, sessionId) {
   try {
     await supabase.from("tiktok_sessions").update({ status: "connecting" }).eq("id", sessionId);
     currentSessionId = sessionId;
+    currentStreamerUsername = username.replace("@", "");
     currentLive = new WebcastPushConnection(username);
     
     console.log(`🔌 Conectando em @${username}...`);
     await currentLive.connect();
     
+    // Carrega gifts configurados para este streamer
+    await loadConfiguredGifts(currentStreamerUsername);
+    
     await supabase.from("tiktok_sessions").update({ status: "connected" }).eq("id", sessionId);
     console.log(`✅ CONECTADO em @${username}!`);
+    console.log(`🎯 Gifts configurados: ${Array.from(configuredGiftIds).join(', ')}`);
     resetBattleState();
 
     // ========== ESCUTA DE EVENTOS ==========
     
     currentLive.on("gift", async (data) => {
-      console.log(`🎁 Gift: ${data.uniqueId} - ${data.giftName} (ID: ${data.giftId})`);
+      const giftId = data.giftId;
+      const giftName = data.giftName || "";
       
-      if (data.giftId === HEARTME_GIFT_ID || 
-          (data.giftName && data.giftName.toLowerCase().includes(HEARTME_GIFT_NAME.toLowerCase()))) {
-        console.log(`🎯 HEART-ME DETECTADO de ${data.uniqueId}!`);
+      console.log(`🎁 Gift recebido: ${data.uniqueId} - ${giftName} (ID: ${giftId}, ${data.diamondCount} diamantes)`);
+      
+      // Verifica se é um gift configurado para a roleta
+      const isConfiguredGift = 
+        configuredGiftIds.has(giftId) || 
+        configuredGiftNames.has(giftName) ||
+        Array.from(configuredGiftNames).some(name => 
+          giftName.toLowerCase().includes(name.toLowerCase())
+        );
+      
+      if (isConfiguredGift) {
+        console.log(`🎯 GIFT CONFIGURADO DETECTADO de ${data.uniqueId}!`);
         
         await supabase.from("tiktok_events").insert({
           event_type: "heartme",
           username: data.uniqueId,
-          gift_name: data.giftName,
+          gift_name: giftName,
           gift_value: data.diamondCount,
           profile_pic: data.profilePictureUrl,
           session_id: currentSessionId,
-          raw_event: data
+          raw_event: {
+            ...data,
+            detected_by: configuredGiftIds.has(giftId) ? "gift_id" : "gift_name"
+          }
         });
       } else {
+        // Salva como gift normal
         await supabase.from("tiktok_events").insert({
           event_type: "gift",
           username: data.uniqueId,
-          gift_name: data.giftName,
+          gift_name: giftName,
           gift_value: data.diamondCount,
           profile_pic: data.profilePictureUrl,
           session_id: currentSessionId,
@@ -192,6 +276,14 @@ async function connectToLive(username, sessionId) {
       await cleanupSession();
     });
 
+    currentLive.on("like", (data) => {
+      console.log(`❤️ Like: ${data.uniqueId} (${data.likeCount}x)`);
+    });
+
+    currentLive.on("chat", (data) => {
+      console.log(`💬 Chat: ${data.uniqueId}: ${data.comment}`);
+    });
+
   } catch (error) {
     console.error(`❌ Falha ao conectar:`, error.message);
     if (currentSessionId) {
@@ -199,6 +291,7 @@ async function connectToLive(username, sessionId) {
     }
     currentLive = null;
     currentSessionId = null;
+    currentStreamerUsername = null;
   }
 }
 
@@ -219,19 +312,17 @@ supabase
   )
   .subscribe();
 
-// ✅ ESCUTA UPDATEs (desconexões manuais) - CORREÇÃO PRINCIPAL!
+// ESCUTA UPDATEs (desconexões manuais)
 supabase
   .channel("sessions-update")
   .on(
     "postgres_changes",
     { event: "UPDATE", schema: "public", table: "tiktok_sessions" },
     async (payload) => {
-      // Verifica se foi atualizado para "disconnected"
       if (payload.new.status === "disconnected" && currentSessionId === payload.new.id) {
         console.log(`🔌 Sessão ${payload.new.id} desconectada manualmente via Lovable`);
         await cleanupSession();
       }
-      // Verifica se foi atualizado para "error"
       else if (payload.new.status === "error" && currentSessionId === payload.new.id) {
         console.log(`⚠️ Sessão ${payload.new.id} marcada como erro`);
         await cleanupSession();
